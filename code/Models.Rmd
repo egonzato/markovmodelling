@@ -1,0 +1,2110 @@
+---
+title: "LMM"
+author: "Elia Gonzato"
+date: "2024-07-10"
+output: html_document
+---
+
+
+# Overview
+
+The following .Rmd file takes care of:
+
+* Selecting the best model with lmestSearch;
+
+* Characterizing latent classes with their five dimensions and how many people belong to those classes at the beginning of the study (T1)
+
+* Characterize latent trajectories, how likely is my movement towards LC1 given that I am part of LC3?
+
+* Table variables of interest to see if each latent class is characterized by a specific category. The same can be done with multinomial logistic regression. Variables are:
+
+  * Age
+  * Gender
+  * Comorbidity
+  * COVID
+  * Healthcare access (Many missing values, not considered yet)
+
+* In this case I have to select one wave, sensitivity analysis to check if results are stable selecting other waves.
+  
+* Use other variable within popcorn to assess association of specific ones with having problems/not having problems in each dimension. 
+
+
+
+# Load libraries and dataset
+
+```{r, warning=F, message=F}
+library(pacman)
+p_load(dplyr,
+       readxl,
+       LMest,
+       ggplot2,
+       gdata,
+       tidyr,
+       nnet,
+       corrplot,
+       poLCA)
+```
+
+Load dataset
+
+```{r}
+# load dataset
+df=read_xlsx('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Clean dataset\\w1234.xlsx')
+# clean
+popcorn=df %>% 
+  mutate(QoL=MO+PD+AD+UA+SC,
+         Time=factor(t+2019),
+         Country=factor(Country),
+         Gender=factor(Gender),
+         Covid=factor(Covid),
+         Comorbidity=factor(Comorb),
+         AgeCat=ifelse(is.na(AgeCat),'>75',AgeCat),
+         id=ID,
+         time=t) %>%
+  arrange(ID,t)%>% 
+  mutate(gender=as.numeric(Gender)) %>% 
+  mutate_at(vars(MO,PD,AD,UA,SC),~ifelse(.==1,0,1)) %>% 
+  group_by(ID) %>% 
+  mutate(AgeMed=ifelse(max(Age)>55,'>55','<=55'))
+```
+
+# Latent Class Analysis by year
+
+
+```{r, eval=FALSE}
+popcorn.fact=popcorn %>% 
+  mutate(across(c(MO,PD,AD,UA,SC),as.factor))
+# create vectors for for loop
+t=rep(c(1:4),each=10);nlc=rep(seq(1,10),4)
+AIC.v=c(); BIC.v=c()
+# set seed for reproducibility
+set.seed(111100)
+# run model
+for (ti in 1:4){
+  popcorn.filt=popcorn.fact %>% filter(time==ti)
+  for (k in 1:10){
+    lcmod=poLCA(cbind(MO,PD,AD,UA,SC)~1,data=popcorn.filt,nclass=k, nrep = 10, maxiter = 1000)
+    # sel factors
+    AIC=lcmod$aic; BIC=lcmod$bic
+    # bind to vector
+    AIC.v=c(AIC.v,AIC); BIC.v=c(BIC.v,BIC)
+  }
+}
+# bind to a single dataset
+diag=data.frame(t,nlc,AIC.v,BIC.v) 
+# save diags
+writexl::write_xlsx(diag,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\diagnosticslca.xlsx')
+```
+
+Visualize diag
+
+```{r}
+diag=read_xlsx('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\diagnosticslca.xlsx')
+# go long with AIC and BIC
+long.diag=gather(diag,key = 'Diagnostic','Value',c(AIC.v,BIC.v)) %>% 
+  group_by(Diagnostic) %>% 
+  mutate(Year=t+2019,
+         Diagnostic=ifelse(Diagnostic=='AIC.v','AIC','BIC'))
+# plot results
+ggplot(data=long.diag, aes(x=nlc,Value,group=Diagnostic,color=Diagnostic))+
+  geom_point()+
+  geom_line()+
+  scale_x_continuous(breaks=c(1:10))+
+  scale_color_manual(values = c("#FC0E07","#55C8F8"))+
+  facet_wrap(~Year)+
+  theme_bw()+
+  theme(strip.text = element_text(face="bold", size=9),
+        strip.background = element_rect(fill='white'),
+        legend.position = 'bottom')+
+  labs(x='Number of latent classes',
+       y='Score',
+       color='Fit Statistic')
+```
+
+In all four years, the best number of latent classes is equal to three or four, so the trend is homogeneous
+
+
+# Latent Markov Models
+
+## Grid Search between models with different parameters
+
+```{r, eval=FALSE}
+list.grid=list()
+for (i in 1:3){
+  grid=lmestSearch(MO+PD+AD+UA+SC~NULL,
+                 data=popcorn,
+                 index = c('id','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 modBasic=i-1,
+                 k=1:10,
+                 maxit = 2500,
+                 tol1 = 10^-10,
+                 tol2 = 10^-12,
+                 seed=111100)
+  list.grid[[i]]=grid
+}
+save(list.grid,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\listgridlmm.Rdata')
+```
+
+## Plot AIC and BIC to select the best model
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\listgridlmm.Rdata')
+# concatenate
+stat=data.frame(process=rep(c('Heterogenous','Homogeneous','Partially Homogeneous'),each=20),
+                diag=rep(rep(c('AIC','BIC'),each=10),3),
+                value=c(list.grid[[1]]$Aic,list.grid[[1]]$Bic,
+                        list.grid[[2]]$Aic,list.grid[[2]]$Bic,
+                        list.grid[[3]]$Aic,list.grid[[3]]$Bic),
+                lc=rep(seq(1,10),6))
+# plot results
+ggplot(stat,aes(x=lc,y=value,group=diag,color=diag))+
+  geom_line()+
+  geom_point()+
+  labs(color='Fit Statistic',
+       y='Score',
+       x='Number of latent states')+
+  scale_x_continuous(breaks=seq(1,10,1))+
+  scale_color_manual(values = c("#FC0E07","#55C8F8"))+
+  theme_bw()+
+  facet_wrap(~process)+
+  theme(strip.text = element_text(face="bold", size=9),
+        strip.background = element_rect(fill='white'),
+        legend.position = 'bottom')
+```
+
+## Calculate  Entropy
+
+```{r}
+entR2process=c()
+# select number of latent classes
+for (j in 1:3){
+  entropy=c()
+for (i in 2:10){
+  grid=list.grid[[j]]
+  model=grid$out.single[[i]]
+  post=as.data.frame(cbind(model$yv,model$S[,1,],model$V[,,1]))
+  # give names
+  names(post)=c('Freq',paste(c('MO','PD','AD','UA','SC'),i,sep=''),paste('problc',c(seq(1,i)),sep=''))
+  # create vec no resp
+  noresp=c()
+  # prob for each state
+  for (k in 1:i){
+    # prob
+    post[,ncol(post)+1]=-post[,6+i]*log(post[,6+i])
+    names(post)[ncol(post)]=paste('entropyls',k,sep='')
+    # no resp
+    noresp=c(noresp,-model$piv[k]*log(model$piv[k]))
+  }
+  # no resp
+  entropynoresp=sum(noresp)
+  # create sum prob for post
+  post=post %>% 
+    mutate(sum=rowSums(dplyr::select(., starts_with("entropyls"))),
+           freqentropy=sum*Freq,
+           totentropy=sum(freqentropy))
+  # create entropy vector
+  entropy=c(entropy,unique(post$totentropy)/length(unique(popcorn$ID)))
+  # entropy R2
+}
+entR2=(entropynoresp-entropy)/entropynoresp
+entR2process=c(entR2process,entR2)
+}
+```
+
+Diagnostics:
+
+```{r}
+grid=list.grid[[2]]
+diag=as.data.frame(matrix(ncol=6,nrow = 10))
+for (i in 1:10){
+model=grid$out.single[[i]]
+  diag[i,]=cbind(model$k,model$np,model$lk,model$aic,model$bic,min(model$piv))  
+}
+names(diag)=c('LC','Param','lk','AIC','BIC','minprob')
+diag$`Entropy R2`=c(1,entR2process[c(19:27)])
+```
+
+Plot entropy
+
+```{r}
+entropydf=data.frame(entrop=c(1,entR2process[c(1:9)],
+                              1,entR2process[c(10:18)],
+                              1,entR2process[c(19:27)]),
+                     process=rep(c('Partially Homogeneous','Homogeneous','Heterogenous'),each=10),
+                     lc=c(rep(seq(1,10,1),3)))
+ggplot(data = entropydf, aes(x=lc,y=entrop,group=process,color=process))+
+  geom_point()+
+  scale_x_continuous(breaks=seq(1,10))+
+  geom_line()+
+  theme_bw()+
+  labs(x='Latent Classes',
+       y='Entropy',
+       color='Transition Process')
+```
+
+#### Initial probabilities
+
+```{r}
+six=list.grid[[2]]$out.single[[6]]
+six$piv
+```
+
+#### Model selection
+
+Print diagnostics and decide which model is the best
+
+```{r}
+print(diag)
+writexl::write_xlsx(diag,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\SelectionLatentClasses.xlsx')
+```
+
+Probably the best model is the one with six latent classes.
+
+## Characterize different classes based on their dimensions
+
+Let's suppose the model with six latent classes is the best. Let's characterize the seven dimensions. Class 1 to 3.
+
+```{r}
+# select model
+six=list.grid[[2]]$out.single[[6]]
+# see transition probabilities
+transition=as.data.frame(round(six$Pi[,,2],2))
+writexl::write_xlsx(transition,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\transitions.xlsx')
+# how are latent states characterize 
+state=as.data.frame(six$Psi)
+names(state)=rep(paste('Latent Class',c(1:6)),5)
+# bind together
+states=as.data.frame(rbind(state[,1:6],
+                           state[,7:12],
+                           state[,13:18],
+                           state[,19:24],
+                           state[,25:30])) %>% 
+  mutate(response=rep(c(0,1),5),
+         condition=rep(c('MO','PD','AD','SC','UA'),each=2),
+         condition=factor(condition,levels=(c('MO',
+                                           'SC',
+                                           'UA',
+                                           'PD',
+                                           'AD'))),
+         problems=ifelse(response==0,'No Problems','Slight-Unable'),
+         condnum=as.numeric(condition)) %>% 
+  arrange(condnum,problems) %>% 
+  mutate(xaxis=seq(1,10,1))
+# now go long 
+stateslong=tidyr::gather(states,class,prob,paste('Latent Class',c(1:6)))
+```
+
+Plot the first three classes
+
+```{r}
+# now plot
+stateslong %>% 
+  filter(class  %in% paste('Latent Class',c(1:6))[1:3]) %>% 
+  ggplot(.,aes(x=xaxis,y=prob,group=class,color=class))+
+  geom_point()+
+  scale_x_continuous(breaks=seq(1,10),labels=rep(c('No Problems','Slight-Extreme'),5))+
+  geom_line()+
+  geom_vline(xintercept = c(2.5,4.5,6.5,8.5),linetype='dashed')+
+  annotate("text", x = c(1.5,3.5,5.5,7.5,9.5), y = rep(1.1,5), label = c('Mobility',
+                                                                         'Self-Care',
+                                                                         'Usual Activities',
+                                                                         'Pain\n Discomfort',
+                                                                         'Anxiety\n Depression'), color = "black", size = 3)+
+  theme_bw()+
+  theme(strip.text = element_text(face="bold", size=9),
+        strip.background = element_rect(fill='white'),
+        legend.position = 'bottom',
+        axis.text.x = element_text(angle = 27, vjust = 1, hjust = 1))+
+  labs(x='Dimensions',y='Conditional Probability',color='Classes')+
+  guides(color = guide_legend(title.position="top", title.hjust = 0.5))+
+  ylim(0,1.2)
+```
+
+
+Plot the other three classes
+
+```{r}
+# now plot
+stateslong %>% 
+  filter(!(class  %in% paste('Latent Class',c(1:6))[1:3])) %>% 
+  ggplot(.,aes(x=xaxis,y=prob,group=class,color=class))+
+  geom_point()+
+  scale_x_continuous(breaks=seq(1,10),labels=rep(c('No Problems','Slight-Extreme'),5))+
+  scale_color_manual(values=c("#1f77b4", "#ff7f0e", "#2ca02c"))+
+  geom_line()+
+  geom_vline(xintercept = c(2.5,4.5,6.5,8.5),linetype='dashed')+
+  annotate("text", x = c(1.5,3.5,5.5,7.5,9.5), y = rep(1.1,5), label = c('Mobility',
+                                                                         'Self-Care',
+                                                                         'Usual Activities',
+                                                                         'Pain\n Discomfort',
+                                                                         'Anxiety\n Depression'), color = "black", size = 3)+
+  theme_bw()+
+  theme(strip.text = element_text(face="bold", size=9),
+        strip.background = element_rect(fill='white'),
+        legend.position = 'bottom',
+        axis.text.x = element_text(angle = 27, vjust = 1, hjust = 1))+
+  labs(x='Dimensions',y='Conditional Probability',color='Classes')+
+  guides(color = guide_legend(title.position="top", title.hjust = 0.5))+
+  ylim(0,1.2)
+```
+
+## Characterize with vertical bars
+
+### Color by dimension
+
+```{r}
+#colors=c('#FF2C05','#29B6F6','#FEF001','#1831F5','#006D2C')
+stateslong %>% 
+  #filter(!(class  %in% c('Class1','Class2','Class3'))) %>%
+  filter(problems=='Slight-Unable') %>% 
+  mutate(numb=case_when(condition=='MO'~1,
+                        condition=='PD'~2,
+                        condition=='AD'~3,
+                        condition=='UA'~4,
+                        T~5)) %>% 
+  ggplot(.,aes(x=condition,y=prob))+
+  geom_bar(position="dodge",stat="identity",width=0.7,color='black',alpha=0.7,aes(fill=condition)) +
+  labs(fill='Condition',
+       y="Conditional Probability",
+       x='Conditions')+
+  scale_fill_manual(values=c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"))+
+  facet_wrap(~class)+
+  theme_bw()+
+  guides(fill='none')+
+  theme(strip.background = element_rect(fill='white'),
+        strip.text = element_text(face="bold", size=9),
+        legend.position = 'bottom')
+```
+
+
+
+### Transition Probabilities before adding covariates
+
+```{r}
+mat.trans=as.matrix(transition)
+writexl::write_xlsx(as.data.frame(mat.trans),'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\TransitionMatrix.xlsx')
+colnames(mat.trans)=c('LC1','LC2','LC3','LC4','LC5','LC6')
+rownames(mat.trans)=c('LC1','LC2','LC3','LC4','LC5','LC6')
+corrplot::corrplot(mat.trans, tl.col='black',tl.cex = 1,
+                   method = 'color', order = 'alphabet',
+                   addCoef.col = 'black',col = corrplot::COL1('Blues', 50),
+                   is.corr = FALSE, col.lim = c(0, 1))
+```
+
+
+
+#### Stratifying Analysis
+
+##### Gender
+
+```{r}
+# create list
+list.gend=list()
+# loop through dataset
+for (i in 1:2){
+  df2=popcorn %>% filter(Gender==i)
+  strat.com=lmestSearch(MO+PD+AD+UA+SC~NULL,
+                 data=df2,
+                 index = c('id','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 modBasic=1,
+                 k=1:10,
+                 #maxit = 2500,
+                 #tol1 = 10^-10,
+                 #tol2 = 10^-12,
+                 seed=111100)
+  list.gend[[i]]=strat.com
+}
+save(list.gend,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\sensgend.Rdata')
+```
+
+See the best models:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\sensgend.Rdata')
+list.gend[[1]]$Bic
+list.gend[[2]]$Bic
+```
+
+Between six and seven for Gender
+
+##### Age
+
+```{r}
+# create list
+list.age=list()
+# loop through dataset
+for (i in 1:2){
+  df2=popcorn %>% filter(AgeMed==i)
+  lmdf2=lmestData(df2,id = "id",time="time")
+  strat.com=lmestSearch(MO+PD+AD+UA+SC~NULL,
+                 data=lmdf2,
+                 index = c('id','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 modBasic=1,
+                 k=1:10,
+                 #maxit = 2500,
+                 #tol1 = 10^-10,
+                 #tol2 = 10^-12,
+                 seed=111100)
+  list.age[[i]]=strat.com
+}
+save(list.age,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\sensage.Rdata')
+```
+
+See the best models:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\sensage.Rdata')
+list.age[[1]]$Bic
+list.age[[2]]$Bic
+```
+
+Minimum between six and seven here too
+
+##### Comorbidity
+
+```{r}
+# create list
+list.com=list()
+# loop through dataset
+for (i in 0:1){
+  df=popcorn %>% filter(Comorb==i)
+  lmdf=lmestData(df,id = "id",time="time")
+  strat.com=lmestSearch(MO+PD+AD+UA+SC~NULL,
+                 data=lmdf,
+                 index = c('id','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 modBasic=1,
+                 k=1:10,
+                 #maxit = 2500,
+                 #tol1 = 10^-10,
+                 #tol2 = 10^-12,
+                 seed=111100)
+  list.com[[i+1]]=strat.com
+}
+save(list.com,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\senscomorb.Rdata')
+```
+
+See the best models:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\senscomorb.Rdata')
+list.com[[1]]$Bic
+list.com[[2]]$Bic
+```
+
+More or less the five/six latent classes for comorbidities
+
+##### Covid
+
+```{r}
+# create list
+list.covid=list()
+# loop through dataset
+for (i in 1:3){
+  df=popcorn %>% filter(Covid==i)
+  lmdf=lmestData(df,id = "id",time="time")
+  strat.com=lmestSearch(MO+PD+AD+UA+SC~NULL,
+                 data=lmdf,
+                 index = c('id','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 modBasic=1,
+                 k=1:10,
+                 #maxit = 2500,
+                 #tol1 = 10^-10,
+                 #tol2 = 10^-12,
+                 seed=111100)
+  list.covid[[i]]=strat.com
+}
+save(list.covid,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\Code\\All material\\Models\\senscov.Rdata')
+```
+
+See the best models:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\senscov.Rdata')
+list.covid[[1]]$Bic
+list.covid[[2]]$Bic
+list.covid[[3]]$Bic
+```
+
+
+Slightly different for covid-19, but still between four, five and six.
+
+
+##### Education
+
+```{r}
+# create list
+list.edu=list()
+# loop through dataset
+for (i in 1:3){
+  df=popcorn %>% filter(Education==i)
+  lmdf=lmestData(df,id = "id",time="time")
+  strat.com=lmestSearch(MO+PD+AD+UA+SC~NULL,
+                 data=lmdf,
+                 index = c('id','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 modBasic=1,
+                 k=1:10,
+                 maxit = 2500,
+                 tol1 = 10^-10,
+                 tol2 = 10^-12,
+                 seed=111100)
+  list.edu[[i]]=strat.com
+}
+save(list.edu,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\sensedu.Rdata')
+```
+
+See the best models:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\sensedu.Rdata')
+list.edu[[1]]$Bic
+list.edu[[2]]$Bic
+list.edu[[3]]$Bic
+```
+
+
+Seventh is the best in two out of three levels, not big difference with the sixth class.
+
+
+
+##### Countries
+
+```{r}
+# create list
+list.countries=list()
+countr=c(as.character(unique(popcorn$Country)))
+# loop through dataset
+for (i in 1:6){
+  df=popcorn %>% filter(Country==countr[i])
+  lmdf=lmestData(df,id = "id",time="time")
+  strat.com=lmestSearch(MO+PD+AD+UA+SC~NULL,
+                 data=lmdf,
+                 index = c('id','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 modBasic=1,
+                 k=1:10,
+                 #maxit = 2500,
+                 #tol1 = 10^-10,
+                 #tol2 = 10^-12,
+                 seed=111100)
+  list.countries[[i]]=strat.com
+}
+save(list.countries,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\senscountries.Rdata')
+```
+
+See the best models:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\senscountries.Rdata')
+for (i in 1:6){
+  print(list.countries[[i]]$Bic)
+}
+```
+
+
+In all countries the optimal number of latent classes is between five, six and seven, confirming that there are not huge differences between the pooled cohorts and the ones coming from singles countries.
+
+
+
+##### Considerations
+
+Can proceed with six latent classes and interpret results with regards to those.
+
+#### Add covariates
+
+##### Without country
+
+```{r, eval=FALSE}
+keep(popcorn,sure=T)
+popcornsix=popcorn %>% 
+  mutate(Education=case_when(Education==1~'Low',
+                             Education==2~'Middle',
+                             T~'High'),
+         Comorbidity=ifelse(Comorb==0,'Yes','No'),
+         Gender=ifelse(Gender==1,'Male','Female'),
+         Covid=case_when(Covid==1~'No',
+                         Covid==2~'Likely',
+                         T~'Yes')) %>% 
+  mutate(across(c(AgeMed,Gender,Comorbidity,Covid,Education),as.factor))
+# define reference levels
+popcornsix$Education=relevel(popcornsix$Education, ref = 'Low')
+popcornsix$Gender=relevel(popcornsix$Gender, ref = 'Male')
+popcornsix$Comorbidity=relevel(popcornsix$Comorbidity, ref = 'No')
+popcornsix$Covid=relevel(popcornsix$Covid, ref = 'No')
+popcornsix$AgeMed=relevel(popcornsix$AgeMed, ref = '<=55')
+# put in lmest data structure
+popcorngrid=lmestData(popcornsix,id='ID',time='time')
+# model 
+gridsixnocountry=lmestSearch(responsesFormula=MO+PD+AD+UA+SC~NULL,
+                    latentFormula=~AgeMed+Gender+Comorbidity+Covid+Education|NULL,
+                 data=popcorngrid$data,
+                 index = c('ID','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 tol1 = 10^-10,
+                 tol2 = 10^-15,
+                 k=6,
+                 #modBasic=1,
+                 seed=111100)
+save(gridsixnocountry,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixnocountry.Rdata')
+```
+
+See summary of the model:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixnocountry.Rdata')
+# extract model with covariates
+mod6=gridsixnocountry$out.single[[1]]
+#summary(mod7)
+dim(mod6$Psi)
+```
+
+Extract initial probabilities for each latent state
+
+```{r}
+inprob=mod6$Piv
+# calc mean prob state for each latent state
+meaninprob=apply(inprob,2,mean)
+# print initial probabilities
+meaninprob
+```
+
+Calculate latent transition probabilities for each state and report into a matrix; an array is not needed given that the process is believed to homogeneous, which means that transition between states happen the same way between one time point and the other.
+
+```{r}
+transt=round(apply(mod6$PI[, , , 2], c(1, 2), mean), 4)
+print(transt)
+writexl::write_xlsx(as.data.frame(transt),'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\transitioncovsixnocountry.xlsx')
+```
+
+###### Multinomial logistic regression
+
+Extract parameters and standard errors
+
+```{r}
+logodds=mod6$Be
+SEs=mod6$seBe
+colnames(logodds)=paste('LC',c(2:6),sep='')
+colnames(SEs)=paste('LC',c(2:6),sep='')
+```
+
+Calculate confidence intervals
+
+```{r}
+odds=exp(logodds)
+ci_lower=odds * exp(-1.96 * SEs)
+ci_upper=odds *exp(1.96 * SEs)
+z_stat=logodds / SEs #RUN THIS AGAIN, I CHANGED THE Z_stat
+p_values=2 * (1 - pnorm(abs(z_stat)))
+# put in a df
+results_regr=data.frame(
+  OR = round(odds,2),
+  CI_lower = round(ci_lower,2),
+  CI_upper = round(ci_upper,2),
+  P_value = round(p_values,4)
+)
+# print to see results
+options(scipen = 999)
+print(results_regr[,grep("LC5",names(results_regr))])
+results_regr=results_regr[,c("OR.LC2","CI_lower.LC2","CI_upper.LC2","P_value.LC2",
+                             "OR.LC3","CI_lower.LC3","CI_upper.LC3","P_value.LC3",
+                             "OR.LC4","CI_lower.LC4","CI_upper.LC4","P_value.LC4",
+                             "OR.LC5","CI_lower.LC5","CI_upper.LC5","P_value.LC5",
+                             "OR.LC6","CI_lower.LC6","CI_upper.LC6","P_value.LC6")]
+```
+
+
+```{r}
+openxlsx::write.xlsx(results_regr,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionnocountry.xlsx', rowNames=T)
+```
+
+
+Other solution for table
+
+```{r}
+tableres=results_regr %>% 
+  mutate(OR2=paste(OR.LC2,' [',CI_lower.LC2,',',CI_upper.LC2,']',sep=''),
+         p2=P_value.LC2,
+         OR3=paste(OR.LC3,' [',CI_lower.LC3,',',CI_upper.LC3,']',sep=''),
+         p3=P_value.LC3,
+         OR4=paste(OR.LC4,' [',CI_lower.LC4,',',CI_upper.LC4,']',sep=''),
+         p4=P_value.LC4,
+         OR5=paste(OR.LC5,' [',CI_lower.LC5,',',CI_upper.LC5,']',sep=''),
+         p5=P_value.LC5,
+         OR6=paste(OR.LC6,' [',CI_lower.LC6,',',CI_upper.LC6,']',sep=''),
+         p6=P_value.LC6) %>% 
+  dplyr::select(OR2,p2,OR3,p3,OR4,p4,OR5,p5,OR6,p6)
+# write 
+openxlsx::write.xlsx(tableres,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionpasted.xlsx', rowNames=T)
+```
+
+
+###### Assign individuals to latent classes
+
+```{r}
+# Local decoding and create dataset with decoded latent states  
+decode=as.data.frame(cbind(mod6$Ul,ID=1:length(unique(popcorn$ID))))
+names(decode)[c(1:4)]=paste('T',c(1:4),sep='')
+# go to long
+longdecode=gather(decode,'t','state',-ID) %>% 
+  arrange(ID,t) %>% 
+  mutate(t=substr(t, 2, nchar(t)))
+# merge to popcorn 
+#ID.new=rep(seq(1,2419),each=4)
+#popcorn=popcorn %>% arrange(ID,t) %>% mutate(ID=ID.new)
+popdecode=merge(popcorn,longdecode,by=c('ID','t'))
+# smaller df to visualize
+```
+
+Plot states transitions with bar chart
+
+```{r} 
+tabtrans=as.data.frame(table(popdecode$state,popdecode$Time)) %>% 
+  group_by(Var2) %>% 
+  mutate(rel=Freq/sum(Freq)) %>% 
+  ungroup()
+#
+colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#8C564B", "#9467BD")
+#
+ggplot(tabtrans,aes(x=Var2,y=rel,fill=Var1))+
+  geom_bar(position='stack',stat='identity',width=0.5,alpha=0.8,color='black')+
+  scale_fill_manual(values=colors)+
+  theme_bw()+
+  geom_text(aes(label = scales::percent(rel, accuracy = .1)),
+            position = position_stack(vjust = .5),size=3)+
+  theme(strip.background = element_rect(fill='white'))+
+  labs(fill='Latent Classes',
+       x='Year',
+       y='Frequency')
+```
+
+From the plot we can see that:
+
+* Patients belonging to Class 6 and 2 remained slightly the same over time.
+
+* Percentage of Class 4 increased by 1.6 and
+
+Same but within countries
+
+```{r} 
+tabtranscount=as.data.frame(table(popdecode$state,popdecode$Time,popdecode$Country)) %>% 
+  group_by(Var2,Var3) %>% 
+  mutate(rel=Freq/sum(Freq)) %>% 
+  ungroup()
+#
+colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#8C564B", "#9467BD", "#FFD700")
+#
+ggplot(tabtranscount,aes(x=Var2,y=rel,fill=Var1))+
+  geom_bar(position='stack',stat='identity',width=0.5,alpha=0.7,color='black')+
+  scale_fill_manual(values=colors)+
+  theme_bw()+
+    theme(strip.background = element_rect(fill='white'),
+          strip.text = element_text(face="bold", size=9))+
+  facet_wrap(~Var3)+
+  labs(fill='Latent Classes',
+       x='Year',
+       y='Frequency')
+```
+
+
+
+
+##### With Country
+
+```{r, eval=FALSE}
+keep(popcorn,sure=T)
+popcornsix=popcorn %>% 
+  mutate(Education=case_when(Education==1~'Low',
+                             Education==2~'Middle',
+                             T~'High'),
+         Comorbidity=ifelse(Comorb==0,'Yes','No'),
+         Gender=ifelse(Gender==1,'Male','Female'),
+         Covid=case_when(Covid==1~'No',
+                         Covid==2~'Likely',
+                         T~'Yes')) %>% 
+  mutate(across(c(AgeMed,Gender,Comorbidity,Covid,Education,Country),as.factor))
+# define reference levels
+popcornsix$Education=relevel(popcornsix$Education, ref = 'Low')
+popcornsix$Gender=relevel(popcornsix$Gender, ref = 'Male')
+popcornsix$Comorbidity=relevel(popcornsix$Comorbidity, ref = 'No')
+popcornsix$Covid=relevel(popcornsix$Covid, ref = 'No')
+popcornsix$AgeMed=relevel(popcornsix$AgeMed, ref = '<=55')
+popcornsix$Country=relevel(popcornsix$Country, ref = 'ITA')
+# put in lmest data structure
+popcorngrid=lmestData(popcornsix,id='ID',time='time')
+# model 
+gridsixcountry=lmestSearch(responsesFormula=MO+PD+AD+UA+SC~NULL,
+                    latentFormula=~AgeMed+Gender+Comorbidity+Covid+Education+Country|NULL,
+                 data=popcorngrid$data,
+                 index = c('ID','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 tol1 = 10^-10,
+                 tol2 = 10^-15,
+                 k=6,
+                 #modBasic=1,
+                 seed=111100)
+save(gridsixcountry,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixCountry.Rdata')
+```
+
+See summary of the model:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixCountry.Rdata')
+# extract model with covariates
+mod6=gridsixcountry$out.single[[1]]
+#summary(mod7)
+```
+
+Extract initial probabilities for each latent state
+
+```{r}
+inprob=mod6$Piv
+# calc mean prob state for each latent state
+meaninprob=apply(inprob,2,mean)
+```
+
+Calculate latent transition probabilities for each state and report into a matrix; an array is not needed given that the process is believed to homogeneous, which means that transition between states happen the same way between one time point and the other.
+
+```{r}
+transt=round(apply(mod6$PI[, , , 2], c(1, 2), mean), 4)
+print(transt)
+writexl::write_xlsx(as.data.frame(transt),'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\transitioncovsixcountry.xlsx')
+```
+
+###### Characterize latent classes
+
+```{r}
+# how are latent states characterize 
+state=as.data.frame(mod6$Psi)
+names(state)=rep(paste('Latent State',c(1:6)),5)
+# bind together
+states=as.data.frame(rbind(state[,1:6],
+                           state[,7:12],
+                           state[,13:18],
+                           state[,19:24],
+                           state[,25:30])) %>% 
+  mutate(response=rep(c(0,1),5),
+         condition=rep(c('MO','PD','AD','SC','UA'),each=2),
+         condition=factor(condition,levels=(c('MO',
+                                              'SC',
+                                              'UA',
+                                              'PD',
+                                              'AD'))),
+         problems=ifelse(response==0,'No Problems','Slight-Unable'),
+         condnum=as.numeric(condition)) %>% 
+  arrange(condnum,problems) %>% 
+  mutate(xaxis=seq(1,10,1))
+# now go long 
+stateslong=tidyr::gather(states,class,prob,paste('Latent State',c(1:6)))
+# latent interpret
+latentinterpret=states %>% filter(response ==1)
+```
+
+Latent classes with bar chart
+
+```{r}
+#colors=c('#FF2C05','#29B6F6','#FEF001','#1831F5','#006D2C')
+stateslong %>% 
+  #filter(!(class  %in% c('Class1','Class2','Class3'))) %>%
+  filter(problems=='Slight-Unable') %>% 
+  mutate(numb=case_when(condition=='MO'~1,
+                        condition=='PD'~2,
+                        condition=='AD'~3,
+                        condition=='UA'~4,
+                        T~5)) %>% 
+  ggplot(.,aes(x=condition,y=prob))+
+  geom_bar(position="dodge",stat="identity",width=0.7,color='black',alpha=0.7,aes(fill=condition)) +
+  labs(fill='Condition',
+       y="Conditional Probability",
+       x='Conditions')+
+  scale_fill_manual(values=c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"))+
+  facet_wrap(~class)+
+  theme_bw()+
+  guides(fill='none')+
+  theme(strip.background = element_rect(fill='white'),
+        strip.text = element_text(face="bold", size=9),
+        legend.position = 'bottom')
+```
+
+First tree latent classes
+
+```{r}
+# now plot
+stateslong %>% 
+  filter(class  %in% paste('Latent State',c(1:6))[1:3]) %>% 
+  ggplot(.,aes(x=xaxis,y=prob,group=class,color=class))+
+  geom_point()+
+  scale_x_continuous(breaks=seq(1,10),labels=rep(c('No Problems','Slight-Extreme'),5))+
+  geom_line()+
+  geom_vline(xintercept = c(2.5,4.5,6.5,8.5),linetype='dashed')+
+  annotate("text", x = c(1.5,3.5,5.5,7.5,9.5), y = rep(1.1,5), label = c('Mobility',
+                                                                         'Self-Care',
+                                                                         'Usual Activities',
+                                                                         'Pain\n Discomfort',
+                                                                         'Anxiety\n Depression'), color = "black", size = 3)+
+  theme_bw()+
+  theme(strip.text = element_text(face="bold", size=9),
+        strip.background = element_rect(fill='white'),
+        legend.position = 'bottom',
+        axis.text.x = element_text(angle = 27, vjust = 1, hjust = 1))+
+  labs(x='Dimensions',y='Conditional Probability',color='States')+
+  guides(color = guide_legend(title.position="top", title.hjust = 0.5))+
+  ylim(0,1.2)
+```
+
+Last tree latent classes
+
+```{r}
+# now plot
+stateslong %>% 
+  filter(!(class  %in% paste('Latent State',c(1:6))[1:3])) %>% 
+  ggplot(.,aes(x=xaxis,y=prob,group=class,color=class))+
+  geom_point()+
+  scale_x_continuous(breaks=seq(1,10),labels=rep(c('No Problems','Slight-Extreme'),5))+
+  scale_color_manual(values=c("#1f77b4", "#ff7f0e", "#2ca02c"))+
+  geom_line()+
+  geom_vline(xintercept = c(2.5,4.5,6.5,8.5),linetype='dashed')+
+  annotate("text", x = c(1.5,3.5,5.5,7.5,9.5), y = rep(1.1,5), label = c('Mobility',
+                                                                         'Self-Care',
+                                                                         'Usual Activities',
+                                                                         'Pain\n Discomfort',
+                                                                         'Anxiety\n Depression'), color = "black", size = 3)+
+  theme_bw()+
+  theme(strip.text = element_text(face="bold", size=9),
+        strip.background = element_rect(fill='white'),
+        legend.position = 'bottom',
+        axis.text.x = element_text(angle = 27, vjust = 1, hjust = 1))+
+  labs(x='Dimensions',y='Conditional Probability',color='States')+
+  guides(color = guide_legend(title.position="top", title.hjust = 0.5))+
+  ylim(0,1.2)
+
+```
+
+
+
+###### Multinomial logistic regression
+
+Extract parameters and standard errors
+
+```{r}
+logodds=mod6$Be
+SEs=mod6$seBe
+colnames(logodds)=paste('LC',c(2:6),sep='')
+colnames(SEs)=paste('LC',c(2:6),sep='')
+```
+
+Calculate confidence intervals
+
+```{r}
+odds=exp(logodds)
+ci_lower=odds * exp(-1.96 * SEs)
+ci_upper=odds *exp(1.96 * SEs)
+z_stat=logodds / SEs 
+p_values=2 * (1 - pnorm(abs(z_stat)))
+# put in a df
+results_regr=data.frame(
+  OR = round(odds,2),
+  CI_lower = round(ci_lower,2),
+  CI_upper = round(ci_upper,2),
+  P_value = round(p_values,4)
+)
+# print to see results
+options(scipen = 999)
+print(results_regr[,grep("LC3",names(results_regr))])
+results_regr=results_regr[,c("OR.LC2","CI_lower.LC2","CI_upper.LC2","P_value.LC2",
+                             "OR.LC3","CI_lower.LC3","CI_upper.LC3","P_value.LC3",
+                             "OR.LC4","CI_lower.LC4","CI_upper.LC4","P_value.LC4",
+                             "OR.LC5","CI_lower.LC5","CI_upper.LC5","P_value.LC5",
+                             "OR.LC6","CI_lower.LC6","CI_upper.LC6","P_value.LC6")]
+```
+
+
+```{r}
+openxlsx::write.xlsx(results_regr,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionCountries.xlsx', rowNames=T)
+```
+
+
+Other solution for table
+
+```{r}
+tableres=results_regr %>% 
+  mutate(OR2=paste(OR.LC2,' [',CI_lower.LC2,',',CI_upper.LC2,']',sep=''),
+         p2=P_value.LC2,
+         OR3=paste(OR.LC3,' [',CI_lower.LC3,',',CI_upper.LC3,']',sep=''),
+         p3=P_value.LC3,
+         OR4=paste(OR.LC4,' [',CI_lower.LC4,',',CI_upper.LC4,']',sep=''),
+         p4=P_value.LC4,
+         OR5=paste(OR.LC5,' [',CI_lower.LC5,',',CI_upper.LC5,']',sep=''),
+         p5=P_value.LC5,
+         OR6=paste(OR.LC6,' [',CI_lower.LC6,',',CI_upper.LC6,']',sep=''),
+         p6=P_value.LC6) %>% 
+  dplyr::select(OR2,p2,OR3,p3,OR4,p4,OR5,p5,OR6,p6)
+# write 
+openxlsx::write.xlsx(tableres,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionpastedCountries.xlsx', rowNames=T)
+```
+
+
+###### Assign individuals to latent classes
+
+```{r}
+# Local decoding and create dataset with decoded latent states  
+decode=as.data.frame(cbind(mod6$Ul,ID=1:length(unique(popcorn$ID))))
+names(decode)[c(1:4)]=paste('T',c(1:4),sep='')
+# go to long
+longdecode=gather(decode,'t','state',-ID) %>% 
+  arrange(ID,t) %>% 
+  mutate(t=substr(t, 2, nchar(t)))
+# merge to popcorn 
+#ID.new=rep(seq(1,2419),each=4)
+#popcorn=popcorn %>% arrange(ID,t) %>% mutate(ID=ID.new)
+popdecode=merge(popcorn,longdecode,by=c('ID','t'))
+# smaller df to visualize
+```
+
+Plot states transitions with bar chart
+
+```{r} 
+tabtrans=as.data.frame(table(popdecode$state,popdecode$Time)) %>% 
+  group_by(Var2) %>% 
+  mutate(rel=Freq/sum(Freq)) %>% 
+  ungroup()
+#
+colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#8C564B", "#9467BD")
+#
+ggplot(tabtrans,aes(x=Var2,y=rel,fill=Var1))+
+  geom_bar(position='stack',stat='identity',width=0.5,alpha=0.8,color='black')+
+  scale_fill_manual(values=colors)+
+  theme_bw()+
+  geom_text(aes(label = scales::percent(rel, accuracy = .1)),
+            position = position_stack(vjust = .5),size=3)+
+  theme(strip.background = element_rect(fill='white'))+
+  labs(fill='Latent States',
+       x='Year',
+       y='Frequency')
+```
+
+
+
+##### ITA
+
+```{r, eval=FALSE}
+keep(popcorn,sure=T)
+popcornsix=popcorn %>% 
+  filter(Country=='ITA') %>% 
+  mutate(Education=case_when(Education==1~'Low',
+                             Education==2~'Middle',
+                             T~'High'),
+         Comorbidity=ifelse(Comorb==0,'No','Yes'),
+         Gender=ifelse(Gender==1,'Male','Female'),
+         Covid=case_when(Covid==1~'No',
+                         Covid==2~'Likely',
+                         T~'Yes')) %>% 
+  mutate(across(c(AgeMed,Gender,Comorbidity,Covid,Education,Country),as.factor))
+# define reference levels
+popcornsix$AgeMed=relevel(popcornsix$AgeMed, ref = '<=55')
+popcornsix$Education=relevel(popcornsix$Education, ref = 'Low')
+popcornsix$Gender=relevel(popcornsix$Gender, ref = 'Male')
+popcornsix$Comorbidity=relevel(popcornsix$Comorbidity, ref = 'No')
+popcornsix$Covid=relevel(popcornsix$Covid, ref = 'No')
+popcornsix$AgeMed=relevel(popcornsix$AgeMed, ref = '<=55')
+# put in lmest data structure
+popcorngrid=lmestData(popcornsix,id='ID',time='time')
+# model 
+gridsixita=lmestSearch(responsesFormula=MO+PD+AD+UA+SC~NULL,
+                    latentFormula=~AgeMed+Gender+Comorbidity+Covid+Education|NULL,
+                 data=popcorngrid$data,
+                 index = c('ID','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 k=6,
+                 #modBasic=1,
+                 seed=111100)
+save(gridsixita,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixITA.Rdata')
+```
+
+See summary of the model:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixITA.Rdata')
+# extract model with covariates
+mod6=gridsixita$out.single[[1]]
+#summary(mod7)
+```
+
+Extract initial probabilities for each latent state
+
+```{r}
+inprob=mod6$Piv
+# calc mean prob state for each latent state
+meaninprob=apply(inprob,2,mean)
+```
+
+Calculate latent transition probabilities for each state and report into a matrix; an array is not needed given that the process is believed to homogeneous, which means that transition between states happen the same way between one time point and the other.
+
+```{r}
+transt=round(apply(mod6$PI[, , , 2], c(1, 2), mean), 4)
+print(transt)
+writexl::write_xlsx(as.data.frame(transt),'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\transitioncovsixita.xlsx')
+```
+
+###### Multinomial logistic regression
+
+Extract parameters and standard errors
+
+```{r}
+logodds=mod6$Be
+SEs=mod6$seBe
+colnames(logodds)=paste('LC',c(2:6),sep='')
+colnames(SEs)=paste('LC',c(2:6),sep='')
+```
+
+Calculate confidence intervals
+
+```{r}
+odds=exp(logodds)
+ci_lower=odds * exp(-1.96 * SEs)
+ci_upper=odds *exp(1.96 * SEs)
+z_stat=logodds / SEs #RUN THIS AGAIN, I CHANGED THE Z_stat
+p_values=2 * (1 - pnorm(abs(z_stat)))
+# put in a df
+results_regr=data.frame(
+  OR = round(odds,2),
+  CI_lower = round(ci_lower,2),
+  CI_upper = round(ci_upper,2),
+  P_value = round(p_values,4)
+)
+# print to see results
+options(scipen = 999)
+print(results_regr[,grep("LC2",names(results_regr))])
+results_regr=results_regr[,c("OR.LC2","CI_lower.LC2","CI_upper.LC2","P_value.LC2",
+                             "OR.LC3","CI_lower.LC3","CI_upper.LC3","P_value.LC3",
+                             "OR.LC4","CI_lower.LC4","CI_upper.LC4","P_value.LC4",
+                             "OR.LC5","CI_lower.LC5","CI_upper.LC5","P_value.LC5",
+                             "OR.LC6","CI_lower.LC6","CI_upper.LC6","P_value.LC6")]
+```
+
+
+```{r}
+openxlsx::write.xlsx(results_regr,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionITA.xlsx', rowNames=T)
+```
+
+
+Other solution for table
+
+```{r}
+tableres=results_regr %>% 
+  mutate(OR2=paste(OR.LC2,' [',CI_lower.LC2,',',CI_upper.LC2,']',sep=''),
+         p2=P_value.LC2,
+         OR3=paste(OR.LC3,' [',CI_lower.LC3,',',CI_upper.LC3,']',sep=''),
+         p3=P_value.LC3,
+         OR4=paste(OR.LC4,' [',CI_lower.LC4,',',CI_upper.LC4,']',sep=''),
+         p4=P_value.LC4,
+         OR5=paste(OR.LC5,' [',CI_lower.LC5,',',CI_upper.LC5,']',sep=''),
+         p5=P_value.LC5,
+         OR6=paste(OR.LC6,' [',CI_lower.LC6,',',CI_upper.LC6,']',sep=''),
+         p6=P_value.LC6) %>% 
+  dplyr::select(OR2,p2,OR3,p3,OR4,p4,OR5,p5,OR6,p6)
+# write 
+openxlsx::write.xlsx(tableres,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionpastedITA.xlsx', rowNames=T)
+```
+
+
+###### Assign individuals to latent classes
+
+```{r}
+# Local decoding and create dataset with decoded latent states  
+decode=as.data.frame(cbind(mod6$Ul,ID=1:length(unique(popcorn$ID))))
+names(decode)[c(1:4)]=paste('T',c(1:4),sep='')
+# go to long
+longdecode=gather(decode,'t','state',-ID) %>% 
+  arrange(ID,t) %>% 
+  mutate(t=substr(t, 2, nchar(t)))
+# merge to popcorn 
+#ID.new=rep(seq(1,2419),each=4)
+#popcorn=popcorn %>% arrange(ID,t) %>% mutate(ID=ID.new)
+popdecode=merge(popcorn,longdecode,by=c('ID','t'))
+# smaller df to visualize
+```
+
+Plot states transitions with bar chart
+
+```{r} 
+tabtrans=as.data.frame(table(popdecode$state,popdecode$Time)) %>% 
+  group_by(Var2) %>% 
+  mutate(rel=Freq/sum(Freq)) %>% 
+  ungroup()
+#
+colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#8C564B", "#9467BD")
+#
+ggplot(tabtrans,aes(x=Var2,y=rel,fill=Var1))+
+  geom_bar(position='stack',stat='identity',width=0.5,alpha=0.8,color='black')+
+  scale_fill_manual(values=colors)+
+  theme_bw()+
+  geom_text(aes(label = scales::percent(rel, accuracy = .1)),
+            position = position_stack(vjust = .5),size=3)+
+  theme(strip.background = element_rect(fill='white'))+
+  labs(fill='Latent Classes',
+       x='Year',
+       y='Frequency')
+```
+
+
+
+
+##### GRK
+
+```{r, eval=FALSE}
+keep(popcorn,sure=T)
+popcornsix=popcorn %>% 
+  filter(Country=='GRK') %>% 
+  mutate(Education=case_when(Education==1~'Low',
+                             Education==2~'Middle',
+                             T~'High'),
+         Comorbidity=ifelse(Comorb==0,'No','Yes'),
+         Gender=ifelse(Gender==1,'Male','Female'),
+         Covid=case_when(Covid==1~'No',
+                         Covid==2~'Likely',
+                         T~'Yes')) %>% 
+  mutate(across(c(AgeMed,Gender,Comorbidity,Covid,Education,Country),as.factor))
+# define reference levels
+popcornsix$Education=relevel(popcornsix$Education, ref = 'Low')
+popcornsix$Gender=relevel(popcornsix$Gender, ref = 'Male')
+popcornsix$Comorbidity=relevel(popcornsix$Comorbidity, ref = 'No')
+popcornsix$Covid=relevel(popcornsix$Covid, ref = 'No')
+popcornsix$AgeMed=relevel(popcornsix$AgeMed, ref = '<=55')
+# put in lmest data structure
+popcorngrid=lmestData(popcornsix,id='ID',time='time')
+# model 
+gridsixgrk=lmestSearch(responsesFormula=MO+PD+AD+UA+SC~NULL,
+                    latentFormula=~AgeMed+Gender+Comorbidity+Covid+Education|NULL,
+                 data=popcorngrid$data,
+                 index = c('ID','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 k=6,
+                 #modBasic=1,
+                 seed=111100)
+save(gridsixgrk,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixGRK.Rdata')
+```
+
+See summary of the model:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixGRK.Rdata')
+# extract model with covariates
+mod6=gridsixgrk$out.single[[1]]
+#summary(mod7)
+```
+
+Extract initial probabilities for each latent state
+
+```{r}
+inprob=mod6$Piv
+# calc mean prob state for each latent state
+meaninprob=apply(inprob,2,mean)
+```
+
+Calculate latent transition probabilities for each state and report into a matrix; an array is not needed given that the process is believed to homogeneous, which means that transition between states happen the same way between one time point and the other.
+
+```{r}
+transt=round(apply(mod6$PI[, , , 2], c(1, 2), mean), 4)
+print(transt)
+writexl::write_xlsx(as.data.frame(transt),'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\transitioncovsixGRK.xlsx')
+```
+
+###### Multinomial logistic regression
+
+Extract parameters and standard errors
+
+```{r}
+logodds=mod6$Be
+SEs=mod6$seBe
+colnames(logodds)=paste('LC',c(2:6),sep='')
+colnames(SEs)=paste('LC',c(2:6),sep='')
+```
+
+Calculate confidence intervals
+
+```{r}
+odds=exp(logodds)
+ci_lower=odds * exp(-1.96 * SEs)
+ci_upper=odds *exp(1.96 * SEs)
+z_stat=logodds / SEs #RUN THIS AGAIN, I CHANGED THE Z_stat
+p_values=2 * (1 - pnorm(abs(z_stat)))
+# put in a df
+results_regr=data.frame(
+  OR = round(odds,2),
+  CI_lower = round(ci_lower,2),
+  CI_upper = round(ci_upper,2),
+  P_value = round(p_values,4)
+)
+# print to see results
+options(scipen = 999)
+print(results_regr[,grep("LC2",names(results_regr))])
+results_regr=results_regr[,c("OR.LC2","CI_lower.LC2","CI_upper.LC2","P_value.LC2",
+                             "OR.LC3","CI_lower.LC3","CI_upper.LC3","P_value.LC3",
+                             "OR.LC4","CI_lower.LC4","CI_upper.LC4","P_value.LC4",
+                             "OR.LC5","CI_lower.LC5","CI_upper.LC5","P_value.LC5",
+                             "OR.LC6","CI_lower.LC6","CI_upper.LC6","P_value.LC6")]
+```
+
+
+```{r}
+openxlsx::write.xlsx(results_regr,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionGRK.xlsx', rowNames=T)
+```
+
+
+Other solution for table
+
+```{r}
+tableres=results_regr %>% 
+  mutate(OR2=paste(OR.LC2,' [',CI_lower.LC2,',',CI_upper.LC2,']',sep=''),
+         p2=P_value.LC2,
+         OR3=paste(OR.LC3,' [',CI_lower.LC3,',',CI_upper.LC3,']',sep=''),
+         p3=P_value.LC3,
+         OR4=paste(OR.LC4,' [',CI_lower.LC4,',',CI_upper.LC4,']',sep=''),
+         p4=P_value.LC4,
+         OR5=paste(OR.LC5,' [',CI_lower.LC5,',',CI_upper.LC5,']',sep=''),
+         p5=P_value.LC5,
+         OR6=paste(OR.LC6,' [',CI_lower.LC6,',',CI_upper.LC6,']',sep=''),
+         p6=P_value.LC6) %>% 
+  dplyr::select(OR2,p2,OR3,p3,OR4,p4,OR5,p5,OR6,p6)
+# write 
+openxlsx::write.xlsx(tableres,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionpastedGRK.xlsx', rowNames=T)
+```
+
+
+###### Assign individuals to latent classes
+
+```{r}
+# Local decoding and create dataset with decoded latent states  
+decode=as.data.frame(cbind(mod6$Ul,ID=1:length(unique(popcorn$ID))))
+names(decode)[c(1:4)]=paste('T',c(1:4),sep='')
+# go to long
+longdecode=gather(decode,'t','state',-ID) %>% 
+  arrange(ID,t) %>% 
+  mutate(t=substr(t, 2, nchar(t)))
+# merge to popcorn 
+#ID.new=rep(seq(1,2419),each=4)
+#popcorn=popcorn %>% arrange(ID,t) %>% mutate(ID=ID.new)
+popdecode=merge(popcorn,longdecode,by=c('ID','t'))
+# smaller df to visualize
+```
+
+Plot states transitions with bar chart
+
+```{r} 
+tabtrans=as.data.frame(table(popdecode$state,popdecode$Time)) %>% 
+  group_by(Var2) %>% 
+  mutate(rel=Freq/sum(Freq)) %>% 
+  ungroup()
+#
+colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#8C564B", "#9467BD")
+#
+ggplot(tabtrans,aes(x=Var2,y=rel,fill=Var1))+
+  geom_bar(position='stack',stat='identity',width=0.5,alpha=0.8,color='black')+
+  scale_fill_manual(values=colors)+
+  theme_bw()+
+  geom_text(aes(label = scales::percent(rel, accuracy = .1)),
+            position = position_stack(vjust = .5),size=3)+
+  theme(strip.background = element_rect(fill='white'))+
+  labs(fill='Latent Classes',
+       x='Year',
+       y='Frequency')
+```
+
+
+
+
+
+
+##### NL
+
+```{r, eval=FALSE}
+popcornsix=popcorn %>% 
+  filter(Country=='NL') %>% 
+  mutate(Education=case_when(Education==1~'Low',
+                             Education==2~'Middle',
+                             T~'High'),
+         Comorbidity=ifelse(Comorb==0,'No','Yes'),
+         Gender=ifelse(Gender==1,'Male','Female'),
+         Covid=case_when(Covid==1~'No',
+                         Covid==2~'Likely',
+                         T~'Yes')) %>% 
+  mutate(across(c(AgeMed,Gender,Comorbidity,Covid,Education,Country),as.factor))
+# define reference levels
+popcornsix$Education=relevel(popcornsix$Education, ref = 'Low')
+popcornsix$Gender=relevel(popcornsix$Gender, ref = 'Male')
+popcornsix$Comorbidity=relevel(popcornsix$Comorbidity, ref = 'No')
+popcornsix$Covid=relevel(popcornsix$Covid, ref = 'No')
+popcornsix$AgeMed=relevel(popcornsix$AgeMed, ref = '<=55')
+# put in lmest data structure
+popcorngrid=lmestData(popcornsix,id='ID',time='time')
+# model 
+gridsixNL=lmestSearch(responsesFormula=MO+PD+AD+UA+SC~NULL,
+                    latentFormula=~AgeMed+Gender+Comorbidity+Covid+Education|NULL,
+                 data=popcorngrid$data,
+                 index = c('ID','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 k=6,
+                 #modBasic=1,
+                 seed=111100)
+save(gridsixNL,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixNL.Rdata')
+```
+
+See summary of the model:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixNL.Rdata')
+# extract model with covariates
+mod6=gridsixNL$out.single[[1]]
+#summary(mod7)
+```
+
+Extract initial probabilities for each latent state
+
+```{r}
+inprob=mod6$Piv
+# calc mean prob state for each latent state
+meaninprob=apply(inprob,2,mean)
+```
+
+Calculate latent transition probabilities for each state and report into a matrix; an array is not needed given that the process is believed to homogeneous, which means that transition between states happen the same way between one time point and the other.
+
+```{r}
+transt=round(apply(mod6$PI[, , , 2], c(1, 2), mean), 4)
+print(transt)
+write_xlsx(as.data.frame(transt),'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\transitioncovsixNL.xlsx')
+```
+
+###### Multinomial logistic regression
+
+Extract parameters and standard errors
+
+```{r}
+logodds=mod6$Be
+SEs=mod6$seBe
+colnames(logodds)=paste('LC',c(2:6),sep='')
+colnames(SEs)=paste('LC',c(2:6),sep='')
+```
+
+Calculate confidence intervals
+
+```{r}
+odds=exp(logodds)
+ci_lower=odds * exp(-1.96 * SEs)
+ci_upper=odds *exp(1.96 * SEs)
+z_stat=logodds / SEs #RUN THIS AGAIN, I CHANGED THE Z_stat
+p_values=2 * (1 - pnorm(abs(z_stat)))
+# put in a df
+results_regr=data.frame(
+  OR = round(odds,2),
+  CI_lower = round(ci_lower,2),
+  CI_upper = round(ci_upper,2),
+  P_value = round(p_values,4)
+)
+# print to see results
+options(scipen = 999)
+print(results_regr[,grep("LC4",names(results_regr))])
+results_regr=results_regr[,c("OR.LC2","CI_lower.LC2","CI_upper.LC2","P_value.LC2",
+                             "OR.LC3","CI_lower.LC3","CI_upper.LC3","P_value.LC3",
+                             "OR.LC4","CI_lower.LC4","CI_upper.LC4","P_value.LC4",
+                             "OR.LC5","CI_lower.LC5","CI_upper.LC5","P_value.LC5",
+                             "OR.LC6","CI_lower.LC6","CI_upper.LC6","P_value.LC6")]
+```
+
+
+```{r}
+openxlsx::write.xlsx(results_regr,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionNL.xlsx', rowNames=T)
+```
+
+
+Other solution for table
+
+```{r}
+tableres=results_regr %>% 
+  mutate(OR2=paste(OR.LC2,' [',CI_lower.LC2,',',CI_upper.LC2,']',sep=''),
+         p2=P_value.LC2,
+         OR3=paste(OR.LC3,' [',CI_lower.LC3,',',CI_upper.LC3,']',sep=''),
+         p3=P_value.LC3,
+         OR4=paste(OR.LC4,' [',CI_lower.LC4,',',CI_upper.LC4,']',sep=''),
+         p4=P_value.LC4,
+         OR5=paste(OR.LC5,' [',CI_lower.LC5,',',CI_upper.LC5,']',sep=''),
+         p5=P_value.LC5,
+         OR6=paste(OR.LC6,' [',CI_lower.LC6,',',CI_upper.LC6,']',sep=''),
+         p6=P_value.LC6) %>% 
+  dplyr::select(OR2,p2,OR3,p3,OR4,p4,OR5,p5,OR6,p6)
+# write 
+openxlsx::write.xlsx(tableres,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionpastedNL.xlsx', rowNames=T)
+```
+
+
+###### Assign individuals to latent classes
+
+```{r}
+# Local decoding and create dataset with decoded latent states  
+decode=as.data.frame(cbind(mod6$Ul,ID=1:length(unique(popcorn$ID))))
+names(decode)[c(1:4)]=paste('T',c(1:4),sep='')
+# go to long
+longdecode=gather(decode,'t','state',-ID) %>% 
+  arrange(ID,t) %>% 
+  mutate(t=substr(t, 2, nchar(t)))
+# merge to popcorn 
+#ID.new=rep(seq(1,2419),each=4)
+#popcorn=popcorn %>% arrange(ID,t) %>% mutate(ID=ID.new)
+popdecode=merge(popcorn,longdecode,by=c('ID','t'))
+# smaller df to visualize
+```
+
+Plot states transitions with bar chart
+
+```{r} 
+tabtrans=as.data.frame(table(popdecode$state,popdecode$Time)) %>% 
+  group_by(Var2) %>% 
+  mutate(rel=Freq/sum(Freq)) %>% 
+  ungroup()
+#
+colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#8C564B", "#9467BD")
+#
+ggplot(tabtrans,aes(x=Var2,y=rel,fill=Var1))+
+  geom_bar(position='stack',stat='identity',width=0.5,alpha=0.8,color='black')+
+  scale_fill_manual(values=colors)+
+  theme_bw()+
+  geom_text(aes(label = scales::percent(rel, accuracy = .1)),
+            position = position_stack(vjust = .5),size=3)+
+  theme(strip.background = element_rect(fill='white'))+
+  labs(fill='Latent Classes',
+       x='Year',
+       y='Frequency')
+```
+
+
+
+
+
+
+##### SWE
+
+```{r, eval=FALSE}
+keep(popcorn,sure=T)
+popcornsix=popcorn %>% 
+  filter(Country=='SWE') %>% 
+  mutate(Education=case_when(Education==1~'Low',
+                             Education==2~'Middle',
+                             T~'High'),
+         Comorbidity=ifelse(Comorb==0,'No','Yes'),
+         Gender=ifelse(Gender==1,'Male','Female'),
+         Covid=case_when(Covid==1~'No',
+                         Covid==2~'Likely',
+                         T~'Yes')) %>% 
+  mutate(across(c(AgeMed,Gender,Comorbidity,Covid,Education,Country),as.factor))
+# define reference levels
+popcornsix$Education=relevel(popcornsix$Education, ref = 'Low')
+popcornsix$Gender=relevel(popcornsix$Gender, ref = 'Male')
+popcornsix$Comorbidity=relevel(popcornsix$Comorbidity, ref = 'No')
+popcornsix$Covid=relevel(popcornsix$Covid, ref = 'No')
+popcornsix$AgeMed=relevel(popcornsix$AgeMed, ref = '<=55')
+# put in lmest data structure
+popcorngrid=lmestData(popcornsix,id='ID',time='time')
+# model 
+gridsixSWE=lmestSearch(responsesFormula=MO+PD+AD+UA+SC~NULL,
+                    latentFormula=~AgeMed+Gender+Comorbidity+Covid+Education|NULL,
+                 data=popcorngrid$data,
+                 index = c('ID','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 k=6,
+                 #modBasic=1,
+                 seed=111100)
+save(gridsixSWE,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixSWE.Rdata')
+```
+
+See summary of the model:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixSWE.Rdata')
+# extract model with covariates
+mod6=gridsixSWE$out.single[[1]]
+#summary(mod7)
+```
+
+Extract initial probabilities for each latent state
+
+```{r}
+inprob=mod6$Piv
+# calc mean prob state for each latent state
+meaninprob=apply(inprob,2,mean)
+```
+
+Calculate latent transition probabilities for each state and report into a matrix; an array is not needed given that the process is believed to homogeneous, which means that transition between states happen the same way between one time point and the other.
+
+```{r}
+transt=round(apply(mod6$PI[, , , 2], c(1, 2), mean), 4)
+print(transt)
+writexl::write_xlsx(as.data.frame(transt),'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\transitioncovsixSWE.xlsx')
+```
+
+###### Multinomial logistic regression
+
+Extract parameters and standard errors
+
+```{r}
+logodds=mod6$Be
+SEs=mod6$seBe
+colnames(logodds)=paste('LC',c(2:6),sep='')
+colnames(SEs)=paste('LC',c(2:6),sep='')
+```
+
+Calculate confidence intervals
+
+```{r}
+odds=exp(logodds)
+ci_lower=odds * exp(-1.96 * SEs)
+ci_upper=odds *exp(1.96 * SEs)
+z_stat=logodds / SEs #RUN THIS AGAIN, I CHANGED THE Z_stat
+p_values=2 * (1 - pnorm(abs(z_stat)))
+# put in a df
+results_regr=data.frame(
+  OR = round(odds,2),
+  CI_lower = round(ci_lower,2),
+  CI_upper = round(ci_upper,2),
+  P_value = round(p_values,4)
+)
+# print to see results
+options(scipen = 999)
+print(results_regr[,grep("LC2",names(results_regr))])
+results_regr=results_regr[,c("OR.LC2","CI_lower.LC2","CI_upper.LC2","P_value.LC2",
+                             "OR.LC3","CI_lower.LC3","CI_upper.LC3","P_value.LC3",
+                             "OR.LC4","CI_lower.LC4","CI_upper.LC4","P_value.LC4",
+                             "OR.LC5","CI_lower.LC5","CI_upper.LC5","P_value.LC5",
+                             "OR.LC6","CI_lower.LC6","CI_upper.LC6","P_value.LC6")]
+```
+
+
+```{r}
+openxlsx::write.xlsx(results_regr,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\Code\\All material\\Tables\\multinomialregressionSWE.xlsx', rowNames=T)
+```
+
+
+Other solution for table
+
+```{r}
+tableres=results_regr %>% 
+  mutate(OR2=paste(OR.LC2,' [',CI_lower.LC2,',',CI_upper.LC2,']',sep=''),
+         p2=P_value.LC2,
+         OR3=paste(OR.LC3,' [',CI_lower.LC3,',',CI_upper.LC3,']',sep=''),
+         p3=P_value.LC3,
+         OR4=paste(OR.LC4,' [',CI_lower.LC4,',',CI_upper.LC4,']',sep=''),
+         p4=P_value.LC4,
+         OR5=paste(OR.LC5,' [',CI_lower.LC5,',',CI_upper.LC5,']',sep=''),
+         p5=P_value.LC5,
+         OR6=paste(OR.LC6,' [',CI_lower.LC6,',',CI_upper.LC6,']',sep=''),
+         p6=P_value.LC6) %>% 
+  dplyr::select(OR2,p2,OR3,p3,OR4,p4,OR5,p5,OR6,p6)
+# write 
+openxlsx::write.xlsx(tableres,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionpastedSWE.xlsx', rowNames=T)
+```
+
+
+###### Assign individuals to latent classes
+
+```{r}
+# Local decoding and create dataset with decoded latent states  
+decode=as.data.frame(cbind(mod6$Ul,ID=1:length(unique(popcorn$ID))))
+names(decode)[c(1:4)]=paste('T',c(1:4),sep='')
+# go to long
+longdecode=gather(decode,'t','state',-ID) %>% 
+  arrange(ID,t) %>% 
+  mutate(t=substr(t, 2, nchar(t)))
+# merge to popcorn 
+#ID.new=rep(seq(1,2419),each=4)
+#popcorn=popcorn %>% arrange(ID,t) %>% mutate(ID=ID.new)
+popdecode=merge(popcorn,longdecode,by=c('ID','t'))
+# smaller df to visualize
+```
+
+Plot states transitions with bar chart
+
+```{r} 
+tabtrans=as.data.frame(table(popdecode$state,popdecode$Time)) %>% 
+  group_by(Var2) %>% 
+  mutate(rel=Freq/sum(Freq)) %>% 
+  ungroup()
+#
+colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#8C564B", "#9467BD")
+#
+ggplot(tabtrans,aes(x=Var2,y=rel,fill=Var1))+
+  geom_bar(position='stack',stat='identity',width=0.5,alpha=0.8,color='black')+
+  scale_fill_manual(values=colors)+
+  theme_bw()+
+  geom_text(aes(label = scales::percent(rel, accuracy = .1)),
+            position = position_stack(vjust = .5),size=3)+
+  theme(strip.background = element_rect(fill='white'))+
+  labs(fill='Latent Classes',
+       x='Year',
+       y='Frequency')
+```
+
+
+##### UK
+
+```{r, eval=FALSE}
+keep(popcorn,sure=T)
+popcornsix=popcorn %>% 
+  filter(Country=='UK') %>% 
+  mutate(Education=case_when(Education==1~'Low',
+                             Education==2~'Middle',
+                             T~'High'),
+         Comorbidity=ifelse(Comorb==0,'No','Yes'),
+         Gender=ifelse(Gender==1,'Male','Female'),
+         Covid=case_when(Covid==1~'No',
+                         Covid==2~'Likely',
+                         T~'Yes')) %>% 
+  mutate(across(c(AgeMed,Gender,Comorbidity,Covid,Education,Country),as.factor))
+# define reference levels
+popcornsix$Education=relevel(popcornsix$Education, ref = 'Low')
+popcornsix$Gender=relevel(popcornsix$Gender, ref = 'Male')
+popcornsix$Comorbidity=relevel(popcornsix$Comorbidity, ref = 'No')
+popcornsix$Covid=relevel(popcornsix$Covid, ref = 'No')
+popcornsix$AgeMed=relevel(popcornsix$AgeMed, ref = '<=55')
+# put in lmest data structure
+popcorngrid=lmestData(popcornsix,id='ID',time='time')
+# model 
+gridsixUK=lmestSearch(responsesFormula=MO+PD+AD+UA+SC~NULL,
+                    latentFormula=~AgeMed+Gender+Comorbidity+Covid+Education|NULL,
+                 data=popcorngrid$data,
+                 index = c('ID','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 k=6,
+                 #modBasic=1,
+                 seed=111100)
+save(gridsixUK,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixUK.Rdata')
+```
+
+See summary of the model:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixUK.Rdata')
+# extract model with covariates
+mod6=gridsixUK$out.single[[1]]
+#summary(mod7)
+```
+
+Extract initial probabilities for each latent state
+
+```{r}
+inprob=mod6$Piv
+# calc mean prob state for each latent state
+meaninprob=apply(inprob,2,mean)
+```
+
+Calculate latent transition probabilities for each state and report into a matrix; an array is not needed given that the process is believed to homogeneous, which means that transition between states happen the same way between one time point and the other.
+
+```{r}
+transt=round(apply(mod6$PI[, , , 2], c(1, 2), mean), 4)
+print(transt)
+writexl::write_xlsx(as.data.frame(transt),'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\transitioncovsixUK.xlsx')
+```
+
+###### Multinomial logistic regression
+
+Extract parameters and standard errors
+
+```{r}
+logodds=mod6$Be
+SEs=mod6$seBe
+colnames(logodds)=paste('LC',c(2:6),sep='')
+colnames(SEs)=paste('LC',c(2:6),sep='')
+```
+
+Calculate confidence intervals
+
+```{r}
+odds=exp(logodds)
+ci_lower=odds * exp(-1.96 * SEs)
+ci_upper=odds *exp(1.96 * SEs)
+z_stat=logodds / SEs #RUN THIS AGAIN, I CHANGED THE Z_stat
+p_values=2 * (1 - pnorm(abs(z_stat)))
+# put in a df
+results_regr=data.frame(
+  OR = round(odds,2),
+  CI_lower = round(ci_lower,2),
+  CI_upper = round(ci_upper,2),
+  P_value = round(p_values,4)
+)
+# print to see results
+options(scipen = 999)
+print(results_regr[,grep("LC2",names(results_regr))])
+results_regr=results_regr[,c("OR.LC2","CI_lower.LC2","CI_upper.LC2","P_value.LC2",
+                             "OR.LC3","CI_lower.LC3","CI_upper.LC3","P_value.LC3",
+                             "OR.LC4","CI_lower.LC4","CI_upper.LC4","P_value.LC4",
+                             "OR.LC5","CI_lower.LC5","CI_upper.LC5","P_value.LC5",
+                             "OR.LC6","CI_lower.LC6","CI_upper.LC6","P_value.LC6")]
+```
+
+
+```{r}
+openxlsx::write.xlsx(results_regr,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionUK.xlsx', rowNames=T)
+```
+
+
+Other solution for table
+
+```{r}
+tableres=results_regr %>% 
+  mutate(OR2=paste(OR.LC2,' [',CI_lower.LC2,',',CI_upper.LC2,']',sep=''),
+         p2=P_value.LC2,
+         OR3=paste(OR.LC3,' [',CI_lower.LC3,',',CI_upper.LC3,']',sep=''),
+         p3=P_value.LC3,
+         OR4=paste(OR.LC4,' [',CI_lower.LC4,',',CI_upper.LC4,']',sep=''),
+         p4=P_value.LC4,
+         OR5=paste(OR.LC5,' [',CI_lower.LC5,',',CI_upper.LC5,']',sep=''),
+         p5=P_value.LC5,
+         OR6=paste(OR.LC6,' [',CI_lower.LC6,',',CI_upper.LC6,']',sep=''),
+         p6=P_value.LC6) %>% 
+  dplyr::select(OR2,p2,OR3,p3,OR4,p4,OR5,p5,OR6,p6)
+# write 
+openxlsx::write.xlsx(tableres,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionpastedUK.xlsx', rowNames=T)
+```
+
+
+###### Assign individuals to latent classes
+
+```{r}
+# Local decoding and create dataset with decoded latent states  
+decode=as.data.frame(cbind(mod6$Ul,ID=1:length(unique(popcorn$ID))))
+names(decode)[c(1:4)]=paste('T',c(1:4),sep='')
+# go to long
+longdecode=gather(decode,'t','state',-ID) %>% 
+  arrange(ID,t) %>% 
+  mutate(t=substr(t, 2, nchar(t)))
+# merge to popcorn 
+#ID.new=rep(seq(1,2419),each=4)
+#popcorn=popcorn %>% arrange(ID,t) %>% mutate(ID=ID.new)
+popdecode=merge(popcorn,longdecode,by=c('ID','t'))
+# smaller df to visualize
+```
+
+Plot states transitions with bar chart
+
+```{r} 
+tabtrans=as.data.frame(table(popdecode$state,popdecode$Time)) %>% 
+  group_by(Var2) %>% 
+  mutate(rel=Freq/sum(Freq)) %>% 
+  ungroup()
+#
+colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#8C564B", "#9467BD")
+#
+ggplot(tabtrans,aes(x=Var2,y=rel,fill=Var1))+
+  geom_bar(position='stack',stat='identity',width=0.5,alpha=0.8,color='black')+
+  scale_fill_manual(values=colors)+
+  theme_bw()+
+  geom_text(aes(label = scales::percent(rel, accuracy = .1)),
+            position = position_stack(vjust = .5),size=3)+
+  theme(strip.background = element_rect(fill='white'))+
+  labs(fill='Latent Classes',
+       x='Year',
+       y='Frequency')
+```
+
+
+
+
+
+
+##### USA
+
+```{r, eval=FALSE}
+keep(popcorn,sure=T)
+popcornsix=popcorn %>% 
+  filter(Country=='USA') %>% 
+  mutate(Education=case_when(Education==1~'Low',
+                             Education==2~'Middle',
+                             T~'High'),
+         Comorbidity=ifelse(Comorb==0,'No','Yes'),
+         Gender=ifelse(Gender==1,'Male','Female'),
+         Covid=case_when(Covid==1~'No',
+                         Covid==2~'Likely',
+                         T~'Yes')) %>% 
+  mutate(across(c(AgeMed,Gender,Comorbidity,Covid,Education,Country),as.factor))
+# define reference levels
+popcornsix$Education=relevel(popcornsix$Education, ref = 'Low')
+popcornsix$Gender=relevel(popcornsix$Gender, ref = 'Male')
+popcornsix$Comorbidity=relevel(popcornsix$Comorbidity, ref = 'No')
+popcornsix$Covid=relevel(popcornsix$Covid, ref = 'No')
+popcornsix$AgeMed=relevel(popcornsix$AgeMed, ref = '<=55')
+# put in lmest data structure
+popcorngrid=lmestData(popcornsix,id='ID',time='time')
+# model 
+gridsixUSA=lmestSearch(responsesFormula=MO+PD+AD+UA+SC~NULL,
+                    latentFormula=~AgeMed+Gender+Comorbidity+Covid+Education|NULL,
+                 data=popcorngrid$data,
+                 index = c('ID','time'),
+                 version = 'categorical',
+                 output=T,
+                 out_se = T,
+                 k=6,
+                 #modBasic=1,
+                 seed=111100)
+save(gridsixUSA,file='O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixUSA.Rdata')
+```
+
+See summary of the model:
+
+```{r}
+load('O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Models\\gridlmmsixUSA.Rdata')
+# extract model with covariates
+mod6=gridsixUSA$out.single[[1]]
+#summary(mod7)
+```
+
+Extract initial probabilities for each latent state
+
+```{r}
+inprob=mod6$Piv
+# calc mean prob state for each latent state
+meaninprob=apply(inprob,2,mean)
+```
+
+Calculate latent transition probabilities for each state and report into a matrix; an array is not needed given that the process is believed to homogeneous, which means that transition between states happen the same way between one time point and the other.
+
+```{r}
+transt=round(apply(mod6$PI[, , , 2], c(1, 2), mean), 4)
+print(transt)
+writexl::write_xlsx(as.data.frame(transt),'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\transitioncovsixUSA.xlsx')
+```
+
+###### Multinomial logistic regression
+
+Extract parameters and standard errors
+
+```{r}
+logodds=mod6$Be
+SEs=mod6$seBe
+colnames(logodds)=paste('LC',c(2:6),sep='')
+colnames(SEs)=paste('LC',c(2:6),sep='')
+```
+
+Calculate confidence intervals
+
+```{r}
+odds=exp(logodds)
+ci_lower=odds * exp(-1.96 * SEs)
+ci_upper=odds *exp(1.96 * SEs)
+z_stat=logodds / SEs #RUN THIS AGAIN, I CHANGED THE Z_stat
+p_values=2 * (1 - pnorm(abs(z_stat)))
+# put in a df
+results_regr=data.frame(
+  OR = round(odds,2),
+  CI_lower = round(ci_lower,2),
+  CI_upper = round(ci_upper,2),
+  P_value = round(p_values,4)
+)
+# print to see results
+options(scipen = 999)
+print(results_regr[,grep("LC2",names(results_regr))])
+results_regr=results_regr[,c("OR.LC2","CI_lower.LC2","CI_upper.LC2","P_value.LC2",
+                             "OR.LC3","CI_lower.LC3","CI_upper.LC3","P_value.LC3",
+                             "OR.LC4","CI_lower.LC4","CI_upper.LC4","P_value.LC4",
+                             "OR.LC5","CI_lower.LC5","CI_upper.LC5","P_value.LC5",
+                             "OR.LC6","CI_lower.LC6","CI_upper.LC6","P_value.LC6")]
+```
+
+
+```{r}
+openxlsx::write.xlsx(results_regr,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionUSA.xlsx', rowNames=T)
+```
+
+
+Other solution for table
+
+```{r}
+tableres=results_regr %>% 
+  mutate(OR2=paste(OR.LC2,' [',CI_lower.LC2,',',CI_upper.LC2,']',sep=''),
+         p2=P_value.LC2,
+         OR3=paste(OR.LC3,' [',CI_lower.LC3,',',CI_upper.LC3,']',sep=''),
+         p3=P_value.LC3,
+         OR4=paste(OR.LC4,' [',CI_lower.LC4,',',CI_upper.LC4,']',sep=''),
+         p4=P_value.LC4,
+         OR5=paste(OR.LC5,' [',CI_lower.LC5,',',CI_upper.LC5,']',sep=''),
+         p5=P_value.LC5,
+         OR6=paste(OR.LC6,' [',CI_lower.LC6,',',CI_upper.LC6,']',sep=''),
+         p6=P_value.LC6) %>% 
+  dplyr::select(OR2,p2,OR3,p3,OR4,p4,OR5,p5,OR6,p6)
+# write 
+openxlsx::write.xlsx(tableres,'O:\\PRJCT\\D&I\\3. Research Projects\\Ongoing projects\\POPCORN\\Elia\\All material\\Tables\\multinomialregressionpastedUSA.xlsx', rowNames=T)
+```
+
+
+###### Assign individuals to latent classes
+
+```{r}
+# Local decoding and create dataset with decoded latent states  
+decode=as.data.frame(cbind(mod6$Ul,ID=1:length(unique(popcorn$ID))))
+names(decode)[c(1:4)]=paste('T',c(1:4),sep='')
+# go to long
+longdecode=gather(decode,'t','state',-ID) %>% 
+  arrange(ID,t) %>% 
+  mutate(t=substr(t, 2, nchar(t)))
+# merge to popcorn 
+#ID.new=rep(seq(1,2419),each=4)
+#popcorn=popcorn %>% arrange(ID,t) %>% mutate(ID=ID.new)
+popdecode=merge(popcorn,longdecode,by=c('ID','t'))
+# smaller df to visualize
+```
+
+Plot states transitions with bar chart
+
+```{r} 
+tabtrans=as.data.frame(table(popdecode$state,popdecode$Time)) %>% 
+  group_by(Var2) %>% 
+  mutate(rel=Freq/sum(Freq)) %>% 
+  ungroup()
+#
+colors <- c("#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#8C564B", "#9467BD")
+#
+ggplot(tabtrans,aes(x=Var2,y=rel,fill=Var1))+
+  geom_bar(position='stack',stat='identity',width=0.5,alpha=0.8,color='black')+
+  scale_fill_manual(values=colors)+
+  theme_bw()+
+  geom_text(aes(label = scales::percent(rel, accuracy = .1)),
+            position = position_stack(vjust = .5),size=3)+
+  theme(strip.background = element_rect(fill='white'))+
+  labs(fill='Latent Classes',
+       x='Year',
+       y='Frequency')
+```
+
+
+
+
+
