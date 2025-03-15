@@ -1,6 +1,6 @@
 ### Data
 
-A survey was administered to participants coming from seven different countries. Questions were focused on demographics, medical characteristic and quality of life of each individual. This survey was sent out once a year for four years.
+A survey was administered to participants coming from seven different countries. Questions were focused on demographics, medical characteristics and quality of life of each individual. This survey was sent out once a year for four years.
 
 ### Purpose
 
